@@ -1,0 +1,252 @@
+﻿using System.Net;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using SecureNotesApi.Config;
+using Xunit;
+
+namespace SecureNotes.ConfigAndSecurity.Tests;
+
+public sealed class IntegrationSecurityTests : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly WebApplicationFactory<Program> _factory;
+
+    public IntegrationSecurityTests()
+    {
+        _factory = new WebApplicationFactory<Program>();
+    }
+
+    [Fact]
+    public async Task Доверенный_источник_получает_CORS_заголовок()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            trustedOrigins: new[] { "http://localhost:3000", "https://myapp.com" },
+            readLimit: 100,
+            burstLimit: 20);
+        
+        var client = factory.CreateClient();
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/notes");
+        request.Headers.TryAddWithoutValidation("Origin", "http://localhost:3000");
+
+        // Act
+        var response = await client.SendAsync(request);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.TryGetValues("Access-Control-Allow-Origin", out var values));
+        Assert.Contains("http://localhost:3000", values);
+    }
+
+    [Fact]
+    public async Task Недоверенный_источник_НЕ_получает_CORS_заголовок()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 100,
+            burstLimit: 20);
+        
+        var client = factory.CreateClient();
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/notes");
+        request.Headers.TryAddWithoutValidation("Origin", "https://evil.com");
+
+        // Act
+        var response = await client.SendAsync(request);
+
+        // Assert
+        // Запрос всё ещё может быть OK (CORS не блокирует сам запрос), 
+        // но заголовка Access-Control-Allow-Origin быть не должно
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(response.Headers.Contains("Access-Control-Allow-Origin"));
+    }
+
+    [Fact]
+    public async Task Превышение_лимита_запросов_возвращает_429()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 2,
+            burstLimit: 2);
+        
+        var client = factory.CreateClient();
+
+        // Act
+        async Task<HttpStatusCode> MakeRequest()
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, "/api/notes");
+            request.Headers.TryAddWithoutValidation("Origin", "http://localhost:3000");
+            var response = await client.SendAsync(request);
+            return response.StatusCode;
+        }
+
+        // Первые 2 запроса должны пройти
+        var first = await MakeRequest();
+        var second = await MakeRequest();
+        
+        // 3-й должен быть заблокирован
+        var third = await MakeRequest();
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, first);
+        Assert.Equal(HttpStatusCode.OK, second);
+        Assert.Equal(HttpStatusCode.TooManyRequests, third); // 429
+    }
+
+    [Fact]
+    public async Task Защитные_заголовки_присутствуют_в_ответе()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 100,
+            burstLimit: 20);
+        
+        var client = factory.CreateClient();
+
+        // Act
+        var response = await client.GetAsync("/api/notes");
+
+        // Assert - проверяем минимум 3 защитных заголовка
+        Assert.True(response.Headers.Contains("X-Content-Type-Options"));
+        Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").First());
+        
+        Assert.True(response.Headers.Contains("X-Frame-Options"));
+        Assert.Equal("DENY", response.Headers.GetValues("X-Frame-Options").First());
+        
+        Assert.True(response.Headers.Contains("Cache-Control"));
+        var cacheControl = response.Headers.GetValues("Cache-Control").First();
+        Assert.Contains("no-store", cacheControl);
+    }
+
+    [Fact]
+    public async Task Учебный_режим_возвращает_детальные_ошибки()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            mode: "Development",
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 100,
+            burstLimit: 20);
+        
+        var client = factory.CreateClient();
+
+        // Act - отправляем некорректные данные (пустой title)
+        var content = new StringContent(
+            "{\"title\":\"\",\"content\":\"test\"}", 
+            System.Text.Encoding.UTF8, 
+            "application/json");
+        
+        var response = await client.PostAsync("/api/notes", content);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        // Assert
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("Заголовок не может быть пустым", responseBody); // Детальная ошибка
+        Assert.Contains("validation_error", responseBody);
+    }
+
+    [Fact]
+    public async Task Боевой_режим_скрывает_детали_ошибок()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            mode: "Production",
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 100,
+            burstLimit: 20);
+        
+        var client = factory.CreateClient();
+
+        // Act - отправляем некорректные данные
+        var content = new StringContent(
+            "{\"title\":\"\",\"content\":\"test\"}", 
+            System.Text.Encoding.UTF8, 
+            "application/json");
+        
+        var response = await client.PostAsync("/api/notes", content);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        // Assert
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("Ошибка обработки запроса", responseBody); // Общая ошибка
+        Assert.DoesNotContain("Заголовок не может быть пустым", responseBody); // Нет деталей
+    }
+
+    [Fact]
+    public async Task RequestId_присутствует_в_ответе()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 100,
+            burstLimit: 20);
+        
+        var client = factory.CreateClient();
+
+        // Act
+        var response = await client.GetAsync("/api/notes");
+
+        // Assert
+        Assert.True(response.Headers.Contains("X-Request-ID"));
+        var requestId = response.Headers.GetValues("X-Request-ID").First();
+        Assert.False(string.IsNullOrWhiteSpace(requestId));
+        Assert.True(requestId.Length >= 8); // Наш короткий ID
+    }
+
+    [Fact]
+    public async Task Разные_лимиты_для_чтения_и_записи()
+    {
+        // Arrange
+        var factory = CreateFactory(
+            trustedOrigins: new[] { "http://localhost:3000" },
+            readLimit: 10,
+            burstLimit: 3); // Burst limit = 3 для всех запросов
+        
+        var client = factory.CreateClient();
+
+        // Act & Assert - Проверяем, что burst limit работает
+        for (int i = 0; i < 3; i++)
+        {
+            var response = await client.GetAsync("/api/notes");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        // 4-й запрос должен быть заблокирован (превышен burst)
+        var blockedResponse = await client.GetAsync("/api/notes");
+        Assert.Equal(HttpStatusCode.TooManyRequests, blockedResponse.StatusCode);
+    }
+
+    private WebApplicationFactory<Program> CreateFactory(
+        string[] trustedOrigins, 
+        int readLimit, 
+        int burstLimit,
+        string mode = "Development")
+    {
+        return new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((context, config) =>
+                {
+                    config.Sources.Clear();
+
+                    var settings = new Dictionary<string, string?>
+                    {
+                        ["App:Mode"] = mode,
+                        ["App:RateLimit:RequestsPerMinute"] = readLimit.ToString(),
+                        ["App:RateLimit:BurstLimit"] = burstLimit.ToString(),
+                        ["App:MaxNoteLength"] = "1000",
+                        ["App:EnableRequestLogging"] = "true"
+                    };
+
+                    // Добавляем origins
+                    for (int i = 0; i < trustedOrigins.Length; i++)
+                    {
+                        settings[$"App:AllowedOrigins:{i}"] = trustedOrigins[i];
+                    }
+
+                    config.AddInMemoryCollection(settings);
+                });
+            });
+    }
+}

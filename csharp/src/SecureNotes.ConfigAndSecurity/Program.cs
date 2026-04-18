@@ -5,6 +5,8 @@ using SecureNotesApi.Domain;
 using SecureNotesApi.Middlewares;
 using SecureNotesApi.Services;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("SecureNotes.ConfigAndSecurity.Tests")]
+
 // Настройка маппинга аргументов командной строки
 var switchMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
 {
@@ -210,3 +212,9 @@ app.MapGet("/api/config/info", (AppOptions opts) =>
 }).RequireAuthorization(); 
 
 app.Run();
+
+// Делаем Program видимым для тестов
+public partial class Program 
+{ 
+    // Пустой partial класс нужен для WebApplicationFactory
+}
