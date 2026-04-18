@@ -1,5 +1,5 @@
 ﻿using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.RateLimiting;
+// using Microsoft.AspNetCore.RateLimiting;
 using SecureNotesApi.Config;
 using SecureNotesApi.Domain;
 using SecureNotesApi.Middlewares;
@@ -22,7 +22,6 @@ var switchMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnore
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. ЯВНЫЙ ПОРЯДОК ПРИОРИТЕТА НАСТРОЕК
 builder.Configuration.Sources.Clear();
 builder.Configuration
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
@@ -30,7 +29,6 @@ builder.Configuration
     .AddEnvironmentVariables("NOTES_API_")
     .AddCommandLine(args, switchMappings);
 
-// 2. РАННЯЯ ПРОВЕРКА НАСТРОЕК
 var appOptions = new AppOptions();
 builder.Configuration.GetSection("App").Bind(appOptions);
 
@@ -68,7 +66,6 @@ builder.Services.AddSingleton(appOptions);
 builder.Services.AddSingleton<INoteRepository, InMemoryNoteRepository>();
 builder.Services.AddHttpContextAccessor();
 
-// 3. CORS - ОГРАНИЧЕНИЕ ИСТОЧНИКОВ
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("StrictOrigins", policy =>
@@ -80,7 +77,6 @@ builder.Services.AddCors(options =>
     });
 });
 
-// 4. RATE LIMITING - ОГРАНИЧЕНИЕ ЧАСТОТЫ
 builder.Services.AddRateLimiter(options =>
 {
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
@@ -193,7 +189,6 @@ app.MapDelete("/api/notes/{id:guid}", (Guid id, INoteRepository repo) =>
         : Results.NotFound(new { error = "note_not_found", message = "Заметка не найдена" });
 });
 
-// 6. Эндпоинт для проверки режима работы
 app.MapGet("/api/config/info", (AppOptions opts) => 
 {
     return Results.Ok(new
@@ -212,6 +207,6 @@ app.MapGet("/api/config/info", (AppOptions opts) =>
             requestLogging = opts.EnableRequestLogging
         }
     });
-}).RequireAuthorization(); // Можно добавить авторизацию для этого эндпоинта
+}).RequireAuthorization(); 
 
 app.Run();
